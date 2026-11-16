@@ -40,6 +40,10 @@ use crate::{
     connection::Connecting, incoming::Incoming, work_limiter::WorkLimiter,
 };
 
+/// Datagrams, each up to a GRO batch, received per system call. The receive buffer keeps every
+/// page it was ever written to, so fewer and fuller calls are cheaper in memory.
+const RECV_BATCH: usize = if BATCH_SIZE < 8 { BATCH_SIZE } else { 8 };
+
 /// A QUIC endpoint.
 ///
 /// An endpoint corresponds to a single UDP socket, may host many connections, and may act as both
@@ -759,7 +763,7 @@ impl RecvState {
             0;
             endpoint.config().get_max_udp_payload_size().min(64 * 1024) as usize
                 * max_receive_segments
-                * BATCH_SIZE
+                * RECV_BATCH
         ];
         Self {
             connections: ConnectionSet {
@@ -782,17 +786,17 @@ impl RecvState {
         now: Instant,
     ) -> Result<PollProgress, io::Error> {
         let mut received_connection_packet = false;
-        let mut metas = [RecvMeta::default(); BATCH_SIZE];
-        let mut iovs: [IoSliceMut; BATCH_SIZE] = {
+        let mut metas = [RecvMeta::default(); RECV_BATCH];
+        let mut iovs: [IoSliceMut; RECV_BATCH] = {
             let mut bufs = self
                 .recv_buf
-                .chunks_mut(self.recv_buf.len() / BATCH_SIZE)
+                .chunks_mut(self.recv_buf.len() / RECV_BATCH)
                 .map(IoSliceMut::new);
 
-            // expect() safe as self.recv_buf is chunked into BATCH_SIZE items
-            // and iovs will be of size BATCH_SIZE, thus from_fn is called
-            // exactly BATCH_SIZE times.
-            std::array::from_fn(|_| bufs.next().expect("BATCH_SIZE elements"))
+            // expect() safe as self.recv_buf is chunked into RECV_BATCH items
+            // and iovs will be of size RECV_BATCH, thus from_fn is called
+            // exactly RECV_BATCH times.
+            std::array::from_fn(|_| bufs.next().expect("RECV_BATCH elements"))
         };
         loop {
             match socket.poll_recv(cx, &mut iovs, &mut metas) {
