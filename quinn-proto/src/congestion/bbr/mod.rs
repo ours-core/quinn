@@ -64,6 +64,7 @@ impl Bbr {
     /// Construct a state using the given `config` and current time `now`
     pub fn new(config: Arc<BbrConfig>, current_mtu: u16) -> Self {
         let initial_window = config.initial_window;
+        let (high_gain, high_cwnd_gain) = (config.high_gain, config.high_cwnd_gain);
         Self {
             config,
             current_mtu: current_mtu as u64,
@@ -74,11 +75,11 @@ impl Bbr {
             recovery_state: RecoveryState::NotInRecovery,
             recovery_window: 0,
             is_at_full_bandwidth: false,
-            pacing_gain: K_DEFAULT_HIGH_GAIN,
-            high_gain: K_DEFAULT_HIGH_GAIN,
-            drain_gain: 1.0 / K_DEFAULT_HIGH_GAIN,
-            cwnd_gain: K_DEFAULT_HIGH_GAIN,
-            high_cwnd_gain: K_DEFAULT_HIGH_GAIN,
+            pacing_gain: high_gain,
+            high_gain,
+            drain_gain: 1.0 / high_gain,
+            cwnd_gain: high_cwnd_gain,
+            high_cwnd_gain,
             last_cycle_start: None,
             current_cycle_offset: 0,
             init_cwnd: initial_window,
@@ -110,7 +111,7 @@ impl Bbr {
 
     fn enter_probe_bandwidth_mode(&mut self, now: Instant) {
         self.mode = Mode::ProbeBw;
-        self.cwnd_gain = K_DERIVED_HIGH_CWNDGAIN;
+        self.cwnd_gain = self.config.cwnd_gain;
         self.last_cycle_start = Some(now);
         // Pick a random offset for the gain cycle out of {0, 2..7} range. 1 is
         // excluded because in that case increased gain and decreased gain would not
@@ -383,7 +384,7 @@ impl Bbr {
         }
 
         self.round_wo_bw_gain += 1;
-        if self.round_wo_bw_gain >= K_ROUND_TRIPS_WITHOUT_GROWTH_BEFORE_EXITING_STARTUP as u64
+        if self.round_wo_bw_gain >= self.config.startup_rounds as u64
             || (self.recovery_state.in_recovery())
         {
             self.is_at_full_bandwidth = true;
@@ -516,6 +517,10 @@ impl Controller for Bbr {
 #[derive(Debug, Clone)]
 pub struct BbrConfig {
     initial_window: u64,
+    high_gain: f32,
+    high_cwnd_gain: f32,
+    cwnd_gain: f32,
+    startup_rounds: u8,
 }
 
 impl BbrConfig {
@@ -526,12 +531,48 @@ impl BbrConfig {
         self.initial_window = value;
         self
     }
+
+    /// Pacing gain during STARTUP; DRAIN paces at its inverse.
+    ///
+    /// Default: 2/ln(2), about 2.885.
+    pub fn high_gain(&mut self, value: f32) -> &mut Self {
+        self.high_gain = value;
+        self
+    }
+
+    /// Congestion window gain during STARTUP and DRAIN.
+    ///
+    /// Default: 2/ln(2), about 2.885.
+    pub fn high_cwnd_gain(&mut self, value: f32) -> &mut Self {
+        self.high_cwnd_gain = value;
+        self
+    }
+
+    /// Congestion window gain during PROBE_BW.
+    ///
+    /// Default: 2.0.
+    pub fn cwnd_gain(&mut self, value: f32) -> &mut Self {
+        self.cwnd_gain = value;
+        self
+    }
+
+    /// Round trips without bandwidth growth before STARTUP ends.
+    ///
+    /// Default: 3.
+    pub fn startup_rounds(&mut self, value: u8) -> &mut Self {
+        self.startup_rounds = value;
+        self
+    }
 }
 
 impl Default for BbrConfig {
     fn default() -> Self {
         Self {
             initial_window: K_MAX_INITIAL_CONGESTION_WINDOW * BASE_DATAGRAM_SIZE,
+            high_gain: K_DEFAULT_HIGH_GAIN,
+            high_cwnd_gain: K_DEFAULT_HIGH_GAIN,
+            cwnd_gain: K_DERIVED_HIGH_CWNDGAIN,
+            startup_rounds: K_ROUND_TRIPS_WITHOUT_GROWTH_BEFORE_EXITING_STARTUP,
         }
     }
 }
