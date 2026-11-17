@@ -270,6 +270,7 @@ impl Connection {
         let side = connection_side.side();
         let initial_space = PacketSpace {
             crypto: Some(crypto.initial_keys(&init_cid, side)),
+            next_packet_number: config.initial_packet_number,
             ..PacketSpace::new(now)
         };
         let state = State::Handshake(state::Handshake {
@@ -2511,7 +2512,7 @@ impl Connection {
                 self.rem_handshake_cid = rem_cid;
 
                 let space = &mut self.spaces[SpaceId::Initial];
-                if let Some(info) = space.take(0) {
+                if let Some(info) = space.take(self.config.initial_packet_number) {
                     self.on_packet_acked(now, info);
                 };
 

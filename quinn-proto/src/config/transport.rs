@@ -59,6 +59,7 @@ pub struct TransportConfig {
     pub(crate) datagram_send_buffer_size: usize,
     #[cfg(test)]
     pub(crate) deterministic_packet_numbers: bool,
+    pub(crate) initial_packet_number: u64,
 
     pub(crate) congestion_controller_factory: Arc<dyn congestion::ControllerFactory + Send + Sync>,
 
@@ -373,6 +374,14 @@ impl TransportConfig {
         self
     }
 
+    /// Number of the first packet sent in the Initial packet number space
+    ///
+    /// Defaults to 0. Some implementations start elsewhere, which a client may want to match.
+    pub fn initial_packet_number(&mut self, value: u32) -> &mut Self {
+        self.initial_packet_number = value.into();
+        self
+    }
+
     /// How to construct new `congestion::Controller`s
     ///
     /// Typically the refcounted configuration of a `congestion::Controller`,
@@ -514,6 +523,7 @@ impl Default for TransportConfig {
             datagram_send_buffer_size: 1024 * 1024,
             #[cfg(test)]
             deterministic_packet_numbers: false,
+            initial_packet_number: 0,
 
             congestion_controller_factory: Arc::new(congestion::CubicConfig::default()),
 
@@ -553,6 +563,7 @@ impl fmt::Debug for TransportConfig {
             datagram_send_buffer_size,
             #[cfg(test)]
                 deterministic_packet_numbers: _,
+            initial_packet_number,
             congestion_controller_factory: _,
             enable_segmentation_offload,
             qlog_sink,
@@ -589,6 +600,7 @@ impl fmt::Debug for TransportConfig {
             .field("allow_spin", allow_spin)
             .field("datagram_receive_buffer_size", datagram_receive_buffer_size)
             .field("datagram_send_buffer_size", datagram_send_buffer_size)
+            .field("initial_packet_number", initial_packet_number)
             // congestion_controller_factory not debug
             .field("enable_segmentation_offload", enable_segmentation_offload);
         if cfg!(feature = "qlog") {
