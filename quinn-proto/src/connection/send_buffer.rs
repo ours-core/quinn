@@ -25,6 +25,9 @@ pub(super) struct SendBuffer {
     acks: RangeSet,
     /// Previously transmitted ranges deemed lost
     retransmits: RangeSet,
+    /// Index in `unacked_segments` and stream offset of the segment `get` found last: data is
+    /// mostly sent in order, so lookups start there rather than walk the whole buffer
+    cursor: (usize, u64),
 }
 
 impl SendBuffer {
@@ -74,6 +77,7 @@ impl SendBuffer {
                 to_advance -= front.len();
                 self.unacked_segments.pop_front();
                 self.front_trimmed = 0;
+                self.cursor.0 = self.cursor.0.saturating_sub(1);
 
                 if self.unacked_segments.len() * 4 < self.unacked_segments.capacity() {
                     self.unacked_segments.shrink_to_fit();
@@ -83,6 +87,9 @@ impl SendBuffer {
                 self.front_trimmed += to_advance;
                 to_advance = 0;
             }
+        }
+        if self.cursor.0 == 0 {
+            self.cursor.1 = self.offset - self.unacked_len as u64;
         }
     }
 
@@ -149,20 +156,27 @@ impl SendBuffer {
     /// in noncontiguous fashion in the send buffer. In this case callers
     /// should call the function again with an incremented start offset to
     /// retrieve more data.
-    pub(super) fn get(&self, offsets: Range<u64>) -> &[u8] {
+    pub(super) fn get(&mut self, offsets: Range<u64>) -> &[u8] {
         let base_offset = self.offset - self.unacked_len as u64;
+        if offsets.start < base_offset {
+            return &[];
+        }
 
-        let mut segment_offset = base_offset;
-        for segment in self.unacked_segments.iter() {
-            if offsets.start >= segment_offset
-                && offsets.start < segment_offset + segment.len() as u64
-            {
+        let (mut index, mut segment_offset) = match self.cursor {
+            (index, offset) if offset >= base_offset && offset <= offsets.start => (index, offset),
+            _ => (0, base_offset),
+        };
+        while let Some(segment) = self.unacked_segments.get(index) {
+            if offsets.start < segment_offset + segment.len() as u64 {
+                self.cursor = (index, segment_offset);
+                let segment = &self.unacked_segments[index];
                 let start = (offsets.start - segment_offset) as usize;
                 let end = (offsets.end - segment_offset) as usize;
 
                 return &segment[start..end.min(segment.len())];
             }
             segment_offset += segment.len() as u64;
+            index += 1;
         }
 
         &[]
