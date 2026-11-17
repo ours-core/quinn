@@ -61,6 +61,7 @@ pub struct TransportConfig {
     pub(crate) deterministic_packet_numbers: bool,
     pub(crate) initial_packet_number: u64,
     pub(crate) coalesce_packets: bool,
+    pub(crate) handshake_acks_alone: bool,
 
     pub(crate) congestion_controller_factory: Arc<dyn congestion::ControllerFactory + Send + Sync>,
 
@@ -391,6 +392,14 @@ impl TransportConfig {
         self
     }
 
+    /// Whether a client acknowledges the server's Handshake packets in a packet of its own
+    ///
+    /// Defaults to false: the acknowledgement rides with the client's CRYPTO data.
+    pub fn handshake_acks_alone(&mut self, value: bool) -> &mut Self {
+        self.handshake_acks_alone = value;
+        self
+    }
+
     /// How to construct new `congestion::Controller`s
     ///
     /// Typically the refcounted configuration of a `congestion::Controller`,
@@ -534,6 +543,7 @@ impl Default for TransportConfig {
             deterministic_packet_numbers: false,
             initial_packet_number: 0,
             coalesce_packets: true,
+            handshake_acks_alone: false,
 
             congestion_controller_factory: Arc::new(congestion::CubicConfig::default()),
 
@@ -575,6 +585,7 @@ impl fmt::Debug for TransportConfig {
                 deterministic_packet_numbers: _,
             initial_packet_number,
             coalesce_packets,
+            handshake_acks_alone,
             congestion_controller_factory: _,
             enable_segmentation_offload,
             qlog_sink,
@@ -613,6 +624,7 @@ impl fmt::Debug for TransportConfig {
             .field("datagram_send_buffer_size", datagram_send_buffer_size)
             .field("initial_packet_number", initial_packet_number)
             .field("coalesce_packets", coalesce_packets)
+            .field("handshake_acks_alone", handshake_acks_alone)
             // congestion_controller_factory not debug
             .field("enable_segmentation_offload", enable_segmentation_offload);
         if cfg!(feature = "qlog") {

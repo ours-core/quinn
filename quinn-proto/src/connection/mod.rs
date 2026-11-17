@@ -908,6 +908,9 @@ impl Connection {
                 "SendableFrames was {can_send:?}, but only ACKs have been written"
             );
             pad_datagram |= sent.requires_padding;
+            if self.acks_alone(space_id) && sent.is_ack_only(&self.streams) {
+                builder.ack_eliciting = false;
+            }
 
             if sent.largest_acked.is_some() {
                 self.spaces[space_id].pending_acks.acks_sent();
@@ -1079,6 +1082,11 @@ impl Connection {
             segment_size: None,
             src_ip: self.local_ip,
         })
+    }
+
+    /// Whether an ACK in `space_id` leaves the CRYPTO data pending for the next packet
+    fn acks_alone(&self, space_id: SpaceId) -> bool {
+        space_id == SpaceId::Handshake && self.side.is_client() && self.config.handshake_acks_alone
     }
 
     /// Indicate what types of frames are ready to send for the given space
@@ -3167,6 +3175,7 @@ impl Connection {
         pn: u64,
     ) -> SentFrames {
         let mut sent = SentFrames::default();
+        let acks_alone = self.acks_alone(space_id);
         let space = &mut self.spaces[space_id];
         let is_0rtt = space_id == SpaceId::Data && space.crypto.is_none();
         space.pending_acks.maybe_ack_non_eliciting();
@@ -3268,8 +3277,10 @@ impl Connection {
             }
         }
 
+        let acks_alone = acks_alone && sent.largest_acked.is_some();
+
         // CRYPTO
-        while buf.len() + frame::Crypto::SIZE_BOUND < max_size && !is_0rtt {
+        while buf.len() + frame::Crypto::SIZE_BOUND < max_size && !is_0rtt && !acks_alone {
             let mut frame = match space.pending.crypto.pop_front() {
                 Some(x) => x,
                 None => break,

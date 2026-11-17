@@ -137,3 +137,22 @@ fn packets_can_keep_a_datagram_each() {
             .any(|packets| packets[0].space == SpaceId::Handshake)
     );
 }
+
+#[test]
+fn handshake_acks_can_go_alone() {
+    let mut transport = TransportConfig::default();
+    transport.coalesce_packets(false);
+    let together = handshake(transport)
+        .iter()
+        .filter(|packets| packets[0].space == SpaceId::Handshake)
+        .count();
+
+    let mut transport = TransportConfig::default();
+    transport.coalesce_packets(false);
+    transport.handshake_acks_alone(true);
+    let alone = handshake(transport)
+        .iter()
+        .filter(|packets| packets[0].space == SpaceId::Handshake)
+        .count();
+    assert_eq!(alone, together + 1);
+}
