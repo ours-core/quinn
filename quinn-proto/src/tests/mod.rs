@@ -1806,6 +1806,56 @@ fn stream_flow_control() {
 }
 
 #[test]
+fn receive_windows_grow_from_their_initial_size() {
+    let _guard = subscribe();
+    let mut transport = TransportConfig::default();
+    transport
+        .stream_receive_window((64 * 1024u32).into())
+        .receive_window((128 * 1024u32).into())
+        .initial_stream_receive_window(Some((4 * 1024u32).into()))
+        .initial_receive_window(Some((4 * 1024u32).into()));
+    let server = ServerConfig {
+        transport: Arc::new(transport),
+        ..server_config()
+    };
+    let mut pair = Pair::new(Default::default(), server);
+    let (client_ch, server_ch) = pair.connect();
+    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+
+    let data = vec![7; 1 << 20];
+    let (mut sent, mut received, mut largest_write) = (0, 0, 0);
+    let mut accepted = false;
+    for _ in 0..10_000 {
+        if received == data.len() {
+            break;
+        }
+        if let Ok(n) = pair.client_send(client_ch, s).write(&data[sent..]) {
+            sent += n;
+            largest_write = largest_write.max(n);
+        }
+        pair.drive();
+        if !accepted {
+            accepted = pair.server_streams(server_ch).accept(Dir::Uni) == Some(s);
+            if !accepted {
+                continue;
+            }
+        }
+        let mut recv = pair.server_recv(server_ch, s);
+        let mut chunks = recv.read(true).unwrap();
+        while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
+            received += chunk.bytes.len();
+        }
+        let _ = chunks.finalize();
+        pair.drive();
+    }
+    assert_eq!(received, data.len());
+    assert!(
+        largest_write >= 32 * 1024,
+        "the peer's windows did not grow: largest write {largest_write}"
+    );
+}
+
+#[test]
 fn conn_flow_control() {
     test_flow_control(
         TransportConfig {

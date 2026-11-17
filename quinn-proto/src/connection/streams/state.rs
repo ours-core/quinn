@@ -8,12 +8,13 @@ use bytes::BufMut;
 use rustc_hash::FxHashMap;
 use tracing::{debug, error, trace};
 
+use super::recv::tune;
 use super::{
     PendingStreamsQueue, Recv, Retransmits, Send, SendState, ShouldTransmit, StreamEvent,
     StreamHalf, ThinRetransmits,
 };
 use crate::{
-    Dir, MAX_STREAM_COUNT, Side, StreamId, TransportError, VarInt,
+    Dir, Duration, Instant, MAX_STREAM_COUNT, Side, StreamId, TransportError, VarInt,
     coding::BufMutExt,
     connection::stats::FrameStats,
     frame::{self, FrameStruct, StreamMetaVec},
@@ -110,8 +111,9 @@ pub struct StreamsState {
     pub(super) connection_blocked: Vec<StreamId>,
     /// Connection-level flow control budget dictated by the peer
     pub(super) max_data: u64,
-    /// The initial receive window
+    /// The connection's receive window, which may grow up to `max_receive_window`
     receive_window: u64,
+    max_receive_window: u64,
     /// Limit on incoming data, which is transmitted through `MAX_DATA` frames
     local_max_data: u64,
     /// The last value of `MAX_DATA` which had been queued for transmission in
@@ -129,6 +131,14 @@ pub struct StreamsState {
     pub(super) send_window: u64,
     /// Configured upper bound for how much unacked data the peer can send us per stream
     pub(super) stream_receive_window: u64,
+    /// Window a stream starts with
+    pub(super) initial_stream_receive_window: u64,
+    /// Sum of the data read from or discarded by all receive streams
+    data_read: u64,
+    /// When the connection's window was last tuned, and what had been read by then
+    epoch: Option<(Instant, u64)>,
+    /// The time of the latest packet and the round-trip time then, to tune windows by
+    pub(crate) clock: Option<(Instant, Duration)>,
 
     // Pertinent state from the TransportParameters supplied by the peer
     initial_max_stream_data_uni: VarInt,
@@ -174,6 +184,7 @@ impl StreamsState {
             connection_blocked: Vec::new(),
             max_data: 0,
             receive_window: receive_window.into(),
+            max_receive_window: receive_window.into(),
             local_max_data: receive_window.into(),
             sent_max_data: receive_window,
             data_sent: 0,
@@ -181,6 +192,10 @@ impl StreamsState {
             buffered_data: 0,
             send_window,
             stream_receive_window: stream_receive_window.into(),
+            initial_stream_receive_window: stream_receive_window.into(),
+            data_read: 0,
+            epoch: None,
+            clock: None,
             initial_max_stream_data_uni: 0u32.into(),
             initial_max_stream_data_bidi_local: 0u32.into(),
             initial_max_stream_data_bidi_remote: 0u32.into(),
@@ -270,7 +285,7 @@ impl StreamsState {
         let rs = match self
             .recv
             .get_mut(&id)
-            .map(get_or_insert_recv(self.stream_receive_window))
+            .map(get_or_insert_recv(self.initial_stream_receive_window))
         {
             Some(rs) => rs,
             None => {
@@ -289,6 +304,11 @@ impl StreamsState {
         self.data_recvd = self.data_recvd.saturating_add(new_bytes);
 
         if !rs.stopped {
+            // Windows are tuned from when data started to come.
+            if let Some((now, _)) = self.clock {
+                rs.epoch.get_or_insert((now, 0));
+                self.epoch.get_or_insert((now, 0));
+            }
             self.on_stream_frame(true, id);
             return Ok(ShouldTransmit(false));
         }
@@ -323,7 +343,7 @@ impl StreamsState {
         let rs = match self
             .recv
             .get_mut(&id)
-            .map(get_or_insert_recv(self.stream_receive_window))
+            .map(get_or_insert_recv(self.initial_stream_receive_window))
         {
             Some(stream) => stream,
             None => {
@@ -529,7 +549,7 @@ impl StreamsState {
             }
             retransmits.get_or_create().max_stream_data.insert(id);
 
-            let (max, _) = rs.max_stream_data(self.stream_receive_window);
+            let (max, _) = rs.max_stream_data();
             rs.record_sent_max_stream_data(max);
 
             trace!(stream = %id, max = max, "MAX_STREAM_DATA");
@@ -938,6 +958,7 @@ impl StreamsState {
     /// expanded or shrunk: true if expanded, false if shrunk.
     pub(crate) fn set_receive_window(&mut self, receive_window: VarInt) -> bool {
         let receive_window = receive_window.into();
+        self.max_receive_window = receive_window;
         let mut expanded = false;
         if receive_window > self.receive_window {
             self.local_max_data = self
@@ -950,6 +971,29 @@ impl StreamsState {
         }
         self.receive_window = receive_window;
         expanded
+    }
+
+    /// Starts with smaller windows than the configured maximums, to grow towards them
+    pub(crate) fn start_windows(&mut self, receive_window: VarInt, stream_receive_window: VarInt) {
+        if receive_window.into_inner() < self.receive_window {
+            self.receive_window = receive_window.into();
+            self.local_max_data = receive_window.into();
+            self.sent_max_data = receive_window;
+        }
+        self.initial_stream_receive_window = stream_receive_window
+            .into_inner()
+            .min(self.stream_receive_window);
+    }
+
+    /// Grows the connection's receive window to `window`, within its maximum
+    pub(super) fn ensure_receive_window(&mut self, window: u64) {
+        let window = window.min(self.max_receive_window);
+        if window > self.receive_window {
+            self.local_max_data = self
+                .local_max_data
+                .saturating_add(window - self.receive_window);
+            self.receive_window = window;
+        }
     }
 
     pub(super) fn insert(&mut self, remote: bool, id: StreamId) {
@@ -974,6 +1018,18 @@ impl StreamsState {
     /// suppress sending further updates until the window increases significantly
     /// again.
     pub(super) fn add_read_credits(&mut self, credits: u64) -> ShouldTransmit {
+        self.data_read = self.data_read.saturating_add(credits);
+        if let Some((now, rtt)) = self.clock {
+            let window = tune(
+                &mut self.epoch,
+                now,
+                rtt,
+                self.data_read,
+                self.receive_window,
+                self.max_receive_window,
+            );
+            self.ensure_receive_window(window);
+        }
         if credits > self.receive_window_shrink_debt {
             let net_credits = credits - self.receive_window_shrink_debt;
             self.local_max_data = self.local_max_data.saturating_add(net_credits);
@@ -1014,7 +1070,8 @@ impl StreamsState {
     }
 
     pub(super) fn stream_recv_freed(&mut self, id: StreamId, recv: StreamRecv) {
-        self.free_recv.push(recv.free(self.stream_receive_window));
+        self.free_recv
+            .push(recv.free(self.initial_stream_receive_window));
         self.stream_freed(id, StreamHalf::Recv);
     }
 
@@ -2087,6 +2144,129 @@ mod tests {
             assert_eq!(client.max_remote[Dir::Uni as usize], 200);
             assert_eq!(client.max_remote[Dir::Bi as usize], 201);
         }
+    }
+
+    fn read_all(server: &mut StreamsState, id: StreamId, max: usize) -> ShouldTransmit {
+        let mut pending = Retransmits::default();
+        let mut recv = RecvStream {
+            id,
+            state: server,
+            pending: &mut pending,
+        };
+        let mut chunks = recv.read(true).unwrap();
+        while let Ok(Some(chunk)) = chunks.next(max) {
+            assert!(!chunk.bytes.is_empty());
+        }
+        chunks.finalize()
+    }
+
+    fn receive(server: &mut StreamsState, id: StreamId, offset: u64, len: usize) {
+        let data = Bytes::from(vec![0; len]);
+        let _ = server
+            .received(
+                frame::Stream {
+                    id,
+                    offset,
+                    fin: false,
+                    data,
+                },
+                len,
+            )
+            .unwrap();
+    }
+
+    fn open(server: &mut StreamsState, id: StreamId) -> &mut Recv {
+        match server.recv.get_mut(&id) {
+            Some(Some(StreamRecv::Open(recv))) => recv,
+            _ => panic!("stream {id} is not open"),
+        }
+    }
+
+    fn window(server: &mut StreamsState, id: StreamId) -> u64 {
+        open(server, id).window
+    }
+
+    /// Announces the stream's credit and has the peer use all of it
+    fn announce_and_fill(server: &mut StreamsState, id: StreamId) {
+        let recv = open(server, id);
+        let (max, _) = recv.max_stream_data();
+        recv.record_sent_max_stream_data(max);
+        let end = recv.end;
+        receive(server, id, end, (max - end) as usize);
+    }
+
+    const RTT: Duration = Duration::from_millis(10);
+
+    /// A stream's window grows only while the peer gets each window's worth read within about
+    /// two round trips; `step` is how long that takes
+    fn tuned_stream_window(step: Duration) -> u64 {
+        let mut server = make(Side::Server);
+        server.start_windows((1024 * 1024u32).into(), (16 * 1024u32).into());
+        let id = StreamId::new(Side::Client, Dir::Uni, 0);
+        let mut now = Instant::now();
+        server.clock = Some((now, RTT));
+        receive(&mut server, id, 0, 16 * 1024);
+        for _ in 0..10 {
+            now += step;
+            server.clock = Some((now, RTT));
+            let _ = read_all(&mut server, id, usize::MAX);
+            announce_and_fill(&mut server, id);
+        }
+        window(&mut server, id)
+    }
+
+    #[test]
+    fn stream_window_grows_while_it_holds_the_peer_back() {
+        assert_eq!(tuned_stream_window(Duration::from_millis(1)), 1024 * 1024);
+    }
+
+    #[test]
+    fn stream_window_stays_while_the_path_needs_no_more() {
+        assert_eq!(tuned_stream_window(Duration::from_millis(100)), 16 * 1024);
+    }
+
+    #[test]
+    fn connection_window_grows_while_it_holds_the_peer_back() {
+        for (step, expected) in [(1, 32 * 1024), (100, 16 * 1024)] {
+            let mut server = make(Side::Server);
+            server.stream_receive_window = 4 * 1024;
+            server.start_windows((16 * 1024u32).into(), (4 * 1024u32).into());
+            let now = Instant::now();
+            server.clock = Some((now, RTT));
+            for i in 0..4 {
+                receive(
+                    &mut server,
+                    StreamId::new(Side::Client, Dir::Uni, i),
+                    0,
+                    4 * 1024,
+                );
+            }
+            server.clock = Some((now + Duration::from_millis(step), RTT));
+            let _ = server.add_read_credits(16 * 1024);
+            assert_eq!(server.receive_window, expected, "{step} ms");
+        }
+
+        let mut server = make(Side::Server);
+        server.stream_receive_window = 4 * 1024;
+        server.start_windows((16 * 1024u32).into(), (4 * 1024u32).into());
+        server.set_receive_window((20 * 1024u32).into());
+        let now = Instant::now();
+        server.clock = Some((now, RTT));
+        for i in 0..4 {
+            receive(
+                &mut server,
+                StreamId::new(Side::Client, Dir::Uni, i),
+                0,
+                4 * 1024,
+            );
+        }
+        server.clock = Some((now + Duration::from_millis(1), RTT));
+        let _ = server.add_read_credits(16 * 1024);
+        assert_eq!(
+            server.receive_window,
+            20 * 1024,
+            "a window set later caps the growth"
+        );
     }
 
     #[test]

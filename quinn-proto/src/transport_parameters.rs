@@ -150,14 +150,15 @@ impl TransportParameters {
         server_config: Option<&ServerConfig>,
         rng: &mut impl Rng,
     ) -> Self {
+        let (receive_window, stream_receive_window) = config.initial_windows();
         Self {
             initial_src_cid: Some(initial_src_cid),
             initial_max_streams_bidi: config.max_concurrent_bidi_streams,
             initial_max_streams_uni: config.max_concurrent_uni_streams,
-            initial_max_data: config.receive_window,
-            initial_max_stream_data_bidi_local: config.stream_receive_window,
-            initial_max_stream_data_bidi_remote: config.stream_receive_window,
-            initial_max_stream_data_uni: config.stream_receive_window,
+            initial_max_data: receive_window,
+            initial_max_stream_data_bidi_local: stream_receive_window,
+            initial_max_stream_data_bidi_remote: stream_receive_window,
+            initial_max_stream_data_uni: stream_receive_window,
             max_udp_payload_size: endpoint_config.max_udp_payload_size,
             max_idle_timeout: config.max_idle_timeout.unwrap_or(VarInt(0)),
             disable_active_migration: server_config.is_some_and(|c| !c.migration),

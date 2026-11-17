@@ -30,6 +30,8 @@ pub struct TransportConfig {
     pub(crate) max_idle_timeout: Option<VarInt>,
     pub(crate) stream_receive_window: VarInt,
     pub(crate) receive_window: VarInt,
+    pub(crate) initial_stream_receive_window: Option<VarInt>,
+    pub(crate) initial_receive_window: Option<VarInt>,
     pub(crate) send_window: u64,
     pub(crate) send_fairness: bool,
 
@@ -125,6 +127,39 @@ impl TransportConfig {
     pub fn receive_window(&mut self, value: VarInt) -> &mut Self {
         self.receive_window = value;
         self
+    }
+
+    /// Window each stream starts with, to grow towards
+    /// [`stream_receive_window()`](Self::stream_receive_window)
+    ///
+    /// A stream's window doubles whenever more than half of it was read within about two round
+    /// trips, as in quic-go, so only streams that need a large window get one and buffer that
+    /// much. `None`, the default, starts every stream at the maximum.
+    pub fn initial_stream_receive_window(&mut self, value: Option<VarInt>) -> &mut Self {
+        self.initial_stream_receive_window = value;
+        self
+    }
+
+    /// Window the connection starts with, to grow towards
+    /// [`receive_window()`](Self::receive_window) the way
+    /// [`initial_stream_receive_window()`](Self::initial_stream_receive_window) describes for
+    /// streams. `None`, the default, starts at the maximum.
+    pub fn initial_receive_window(&mut self, value: Option<VarInt>) -> &mut Self {
+        self.initial_receive_window = value;
+        self
+    }
+
+    /// The connection's and each stream's window to start with
+    pub(crate) fn initial_windows(&self) -> (VarInt, VarInt) {
+        let initial =
+            |value: Option<VarInt>, max: VarInt| value.map_or(max, |value| value.min(max));
+        (
+            initial(self.initial_receive_window, self.receive_window),
+            initial(
+                self.initial_stream_receive_window,
+                self.stream_receive_window,
+            ),
+        )
     }
 
     /// Maximum number of bytes retained from application writes across all streams of a connection
@@ -376,6 +411,8 @@ impl Default for TransportConfig {
             max_idle_timeout: Some(VarInt(30_000)),
             stream_receive_window: STREAM_RWND.into(),
             receive_window: VarInt::MAX,
+            initial_stream_receive_window: None,
+            initial_receive_window: None,
             send_window: (8 * STREAM_RWND).into(),
             send_fairness: true,
 
@@ -414,6 +451,8 @@ impl fmt::Debug for TransportConfig {
             max_idle_timeout,
             stream_receive_window,
             receive_window,
+            initial_stream_receive_window,
+            initial_receive_window,
             send_window,
             send_fairness,
             packet_threshold,
@@ -443,6 +482,11 @@ impl fmt::Debug for TransportConfig {
             .field("max_idle_timeout", max_idle_timeout)
             .field("stream_receive_window", stream_receive_window)
             .field("receive_window", receive_window)
+            .field(
+                "initial_stream_receive_window",
+                initial_stream_receive_window,
+            )
+            .field("initial_receive_window", initial_receive_window)
             .field("send_window", send_window)
             .field("send_fairness", send_fairness)
             .field("packet_threshold", packet_threshold)

@@ -349,14 +349,19 @@ impl Connection {
             receiving_ecn: false,
             total_authed_packets: 0,
 
-            streams: StreamsState::new(
-                side,
-                config.max_concurrent_uni_streams,
-                config.max_concurrent_bidi_streams,
-                config.send_window,
-                config.receive_window,
-                config.stream_receive_window,
-            ),
+            streams: {
+                let mut streams = StreamsState::new(
+                    side,
+                    config.max_concurrent_uni_streams,
+                    config.max_concurrent_bidi_streams,
+                    config.send_window,
+                    config.receive_window,
+                    config.stream_receive_window,
+                );
+                let (receive_window, stream_receive_window) = config.initial_windows();
+                streams.start_windows(receive_window, stream_receive_window);
+                streams
+            },
             datagrams: DatagramState::default(),
             config,
             rem_cids: CidQueue::new(rem_cid),
@@ -2807,6 +2812,7 @@ impl Connection {
                     self.read_crypto(SpaceId::Data, &frame, payload_len)?;
                 }
                 Frame::Stream(frame) => {
+                    self.streams.clock = Some((now, self.path.rtt.get()));
                     if self.streams.received(frame, payload_len)?.should_transmit() {
                         self.spaces[SpaceId::Data].pending.max_data = true;
                     }
