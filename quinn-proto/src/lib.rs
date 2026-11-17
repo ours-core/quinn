@@ -60,7 +60,7 @@ mod config;
 pub use config::QlogConfig;
 pub use config::{
     AckFrequencyConfig, ClientConfig, ConfigError, EndpointConfig, IdleTimeout, MtuDiscoveryConfig,
-    ServerConfig, StdSystemTime, TimeSource, TransportConfig, ValidationTokenConfig,
+    ServerConfig, StdSystemTime, TimeSource, TransportConfig, ValidationTokenConfig, WindowBudget,
 };
 
 pub mod crypto;

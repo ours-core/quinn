@@ -360,6 +360,7 @@ impl Connection {
                 );
                 let (receive_window, stream_receive_window) = config.initial_windows();
                 streams.start_windows(receive_window, stream_receive_window);
+                streams.set_window_budget(config.receive_window_budget.clone());
                 streams
             },
             datagrams: DatagramState::default(),

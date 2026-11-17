@@ -2,6 +2,7 @@ use std::{
     collections::{VecDeque, hash_map},
     convert::TryFrom,
     mem,
+    sync::Arc,
 };
 
 use bytes::BufMut;
@@ -15,6 +16,7 @@ use super::{
 };
 use crate::{
     Dir, Duration, Instant, MAX_STREAM_COUNT, Side, StreamId, TransportError, VarInt,
+    WindowBudget,
     coding::BufMutExt,
     connection::stats::FrameStats,
     frame::{self, FrameStruct, StreamMetaVec},
@@ -139,6 +141,8 @@ pub struct StreamsState {
     epoch: Option<(Instant, u64)>,
     /// The time of the latest packet and the round-trip time then, to tune windows by
     pub(crate) clock: Option<(Instant, Duration)>,
+    /// Credit the connection's window grows from, if shared, and how much of it the window holds
+    budget: Option<(Arc<WindowBudget>, u64)>,
 
     // Pertinent state from the TransportParameters supplied by the peer
     initial_max_stream_data_uni: VarInt,
@@ -151,6 +155,12 @@ pub struct StreamsState {
     ///
     /// A new frame is only queued once the peer has raised the limit.
     pub(super) data_blocked_limit: Option<u64>,
+}
+
+impl Drop for StreamsState {
+    fn drop(&mut self) {
+        self.release_window_budget();
+    }
 }
 
 impl StreamsState {
@@ -196,6 +206,7 @@ impl StreamsState {
             data_read: 0,
             epoch: None,
             clock: None,
+            budget: None,
             initial_max_stream_data_uni: 0u32.into(),
             initial_max_stream_data_bidi_local: 0u32.into(),
             initial_max_stream_data_bidi_remote: 0u32.into(),
@@ -985,9 +996,28 @@ impl StreamsState {
             .min(self.stream_receive_window);
     }
 
-    /// Grows the connection's receive window to `window`, within its maximum
+    /// Has the connection's window grow only by credit taken from `budget`
+    pub(crate) fn set_window_budget(&mut self, budget: Option<Arc<WindowBudget>>) {
+        self.release_window_budget();
+        self.budget = budget.map(|budget| (budget, 0));
+    }
+
+    fn release_window_budget(&mut self) {
+        if let Some((budget, taken)) = self.budget.take() {
+            budget.give(taken);
+        }
+    }
+
+    /// Grows the connection's receive window to `window`, within its maximum and its budget
     pub(super) fn ensure_receive_window(&mut self, window: u64) {
-        let window = window.min(self.max_receive_window);
+        let mut window = window.min(self.max_receive_window);
+        if let Some((budget, taken)) = &mut self.budget {
+            if window > self.receive_window {
+                let granted = budget.take(window - self.receive_window);
+                *taken += granted;
+                window = self.receive_window + granted;
+            }
+        }
         if window > self.receive_window {
             self.local_max_data = self
                 .local_max_data
@@ -2267,6 +2297,49 @@ mod tests {
             20 * 1024,
             "a window set later caps the growth"
         );
+    }
+
+    /// Grows the connection's window as one that holds the peer back: its window's worth read
+    /// right after it came
+    fn grow_connection_window(server: &mut StreamsState) {
+        server.stream_receive_window = 4 * 1024;
+        let now = Instant::now();
+        server.clock = Some((now, RTT));
+        for i in 0..4 {
+            receive(server, StreamId::new(Side::Client, Dir::Uni, i), 0, 4 * 1024);
+        }
+        server.clock = Some((now + Duration::from_millis(1), RTT));
+        let _ = server.add_read_credits(16 * 1024);
+    }
+
+    #[test]
+    fn connection_windows_grow_within_a_shared_budget() {
+        let budget = Arc::new(WindowBudget::new(24 * 1024));
+        let start = |budget: &Arc<WindowBudget>| {
+            let mut server = make(Side::Server);
+            server.start_windows((16 * 1024u32).into(), (4 * 1024u32).into());
+            server.set_window_budget(Some(budget.clone()));
+            server
+        };
+        let mut first = start(&budget);
+        grow_connection_window(&mut first);
+        assert_eq!(first.receive_window, 32 * 1024, "first");
+        assert_eq!(budget.used(), 16 * 1024);
+
+        let mut second = start(&budget);
+        grow_connection_window(&mut second);
+        assert_eq!(second.receive_window, 24 * 1024, "second, from what is left");
+        assert_eq!(second.local_max_data, 24 * 1024 + 16 * 1024);
+        assert_eq!(budget.used(), 24 * 1024);
+
+        drop(first);
+        assert_eq!(budget.used(), 8 * 1024, "the first gives its share back");
+        let mut third = start(&budget);
+        grow_connection_window(&mut third);
+        assert_eq!(third.receive_window, 32 * 1024, "third");
+        drop(second);
+        drop(third);
+        assert_eq!(budget.used(), 0);
     }
 
     #[test]

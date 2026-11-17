@@ -1,4 +1,10 @@
-use std::{fmt, sync::Arc};
+use std::{
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 #[cfg(feature = "qlog")]
 use std::{io, sync::Mutex, time::Instant};
 
@@ -32,6 +38,7 @@ pub struct TransportConfig {
     pub(crate) receive_window: VarInt,
     pub(crate) initial_stream_receive_window: Option<VarInt>,
     pub(crate) initial_receive_window: Option<VarInt>,
+    pub(crate) receive_window_budget: Option<Arc<WindowBudget>>,
     pub(crate) send_window: u64,
     pub(crate) send_fairness: bool,
 
@@ -146,6 +153,18 @@ impl TransportConfig {
     /// streams. `None`, the default, starts at the maximum.
     pub fn initial_receive_window(&mut self, value: Option<VarInt>) -> &mut Self {
         self.initial_receive_window = value;
+        self
+    }
+
+    /// Credit that connections sharing it grow their receive windows from
+    ///
+    /// With a budget, a connection's window grows beyond
+    /// [`initial_receive_window()`](Self::initial_receive_window) only by what the budget still
+    /// has, so the windows of all connections that share it, and the data their peers may have
+    /// in flight, stay within the initial windows plus the budget. `None`, the default, grows
+    /// every connection up to [`receive_window()`](Self::receive_window).
+    pub fn receive_window_budget(&mut self, value: Option<Arc<WindowBudget>>) -> &mut Self {
+        self.receive_window_budget = value;
         self
     }
 
@@ -396,6 +415,67 @@ impl TransportConfig {
     }
 }
 
+/// Credit for receive windows to grow, shared by connections
+///
+/// See [`TransportConfig::receive_window_budget()`]. A connection takes what its window grows by
+/// and gives it back when it is dropped.
+#[derive(Debug)]
+pub struct WindowBudget {
+    limit: AtomicU64,
+    used: AtomicU64,
+}
+
+impl WindowBudget {
+    /// A budget of `limit` bytes
+    pub fn new(limit: u64) -> Self {
+        Self {
+            limit: AtomicU64::new(limit),
+            used: AtomicU64::new(0),
+        }
+    }
+
+    /// Bytes the budget has
+    pub fn limit(&self) -> u64 {
+        self.limit.load(Ordering::Relaxed)
+    }
+
+    /// Changes the bytes the budget has; what connections hold beyond a lower limit stays theirs
+    pub fn set_limit(&self, limit: u64) {
+        self.limit.store(limit, Ordering::Relaxed);
+    }
+
+    /// Bytes connections hold
+    pub fn used(&self) -> u64 {
+        self.used.load(Ordering::Relaxed)
+    }
+
+    /// Takes up to `want` bytes; returns how many
+    pub(crate) fn take(&self, want: u64) -> u64 {
+        let limit = self.limit();
+        let mut used = self.used.load(Ordering::Relaxed);
+        loop {
+            let taken = want.min(limit.saturating_sub(used));
+            if taken == 0 {
+                return 0;
+            }
+            match self.used.compare_exchange_weak(
+                used,
+                used + taken,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return taken,
+                Err(now) => used = now,
+            }
+        }
+    }
+
+    /// Gives back `n` bytes taken before
+    pub(crate) fn give(&self, n: u64) {
+        self.used.fetch_sub(n, Ordering::Relaxed);
+    }
+}
+
 impl Default for TransportConfig {
     fn default() -> Self {
         const EXPECTED_RTT: u32 = 100; // ms
@@ -413,6 +493,7 @@ impl Default for TransportConfig {
             receive_window: VarInt::MAX,
             initial_stream_receive_window: None,
             initial_receive_window: None,
+            receive_window_budget: None,
             send_window: (8 * STREAM_RWND).into(),
             send_fairness: true,
 
@@ -453,6 +534,7 @@ impl fmt::Debug for TransportConfig {
             receive_window,
             initial_stream_receive_window,
             initial_receive_window,
+            receive_window_budget,
             send_window,
             send_fairness,
             packet_threshold,
@@ -487,6 +569,7 @@ impl fmt::Debug for TransportConfig {
                 initial_stream_receive_window,
             )
             .field("initial_receive_window", initial_receive_window)
+            .field("receive_window_budget", receive_window_budget)
             .field("send_window", send_window)
             .field("send_fairness", send_fairness)
             .field("packet_threshold", packet_threshold)
