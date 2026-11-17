@@ -212,7 +212,24 @@ impl PacketBuilder {
         let ack_eliciting = self.ack_eliciting;
         let exact_number = self.exact_number;
         let space_id = self.space;
+        let crypto = sent
+            .as_ref()
+            .and_then(|sent| sent.retransmits.get())
+            .map(|retransmits| &retransmits.crypto)
+            .filter(|crypto| !crypto.is_empty());
+        let scramble = space_id == SpaceId::Initial
+            && conn.side.is_client()
+            && conn.config.chaos_protection
+            && buffer.len() < self.min_size;
+        let scrambled = match crypto {
+            Some(crypto) if scramble => {
+                super::chaos::scramble(buffer, crypto, self.min_size, &mut conn.rng);
+                true
+            }
+            _ => false,
+        };
         let (size, padded) = self.finish(conn, now, buffer);
+        let padded = padded || scrambled;
         let sent = match sent {
             Some(sent) => sent,
             None => return,

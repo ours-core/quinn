@@ -41,6 +41,8 @@ mod ack_frequency;
 use ack_frequency::AckFrequencyState;
 
 mod assembler;
+
+mod chaos;
 pub use assembler::Chunk;
 
 mod cid_state;
@@ -3279,8 +3281,44 @@ impl Connection {
 
         let acks_alone = acks_alone && sent.largest_acked.is_some();
 
+        // A ClientHello over several packets has its head and its tail in the first one.
+        let mut split_hello = false;
+        if space_id == SpaceId::Initial && self.side.is_client() && self.config.chaos_protection {
+            let split = match space.pending.crypto.make_contiguous() {
+                [hello] if hello.offset == 0 => {
+                    chaos::split_client_hello(hello.data.len(), max_size - buf.len(), &mut self.rng)
+                }
+                _ => None,
+            };
+            if let Some((head, tail)) = split {
+                let mut middle = space.pending.crypto.pop_front().unwrap();
+                let total = middle.data.len();
+                let head = frame::Crypto {
+                    offset: 0,
+                    data: middle.data.split_to(head),
+                };
+                let tail = frame::Crypto {
+                    offset: (total - tail) as u64,
+                    data: middle.data.split_off(middle.data.len() - tail),
+                };
+                middle.offset = head.data.len() as u64;
+                space.pending.crypto.push_front(middle);
+                for frame in [head, tail] {
+                    trace!("CRYPTO: off {} len {}", frame.offset, frame.data.len());
+                    frame.encode(buf);
+                    self.stats.frame_tx.crypto += 1;
+                    sent.retransmits.get_or_create().crypto.push_back(frame);
+                }
+                split_hello = true;
+            }
+        }
+
         // CRYPTO
-        while buf.len() + frame::Crypto::SIZE_BOUND < max_size && !is_0rtt && !acks_alone {
+        while buf.len() + frame::Crypto::SIZE_BOUND < max_size
+            && !is_0rtt
+            && !acks_alone
+            && !split_hello
+        {
             let mut frame = match space.pending.crypto.pop_front() {
                 Some(x) => x,
                 None => break,

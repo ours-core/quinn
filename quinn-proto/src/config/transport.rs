@@ -62,6 +62,7 @@ pub struct TransportConfig {
     pub(crate) initial_packet_number: u64,
     pub(crate) coalesce_packets: bool,
     pub(crate) handshake_acks_alone: bool,
+    pub(crate) chaos_protection: bool,
 
     pub(crate) congestion_controller_factory: Arc<dyn congestion::ControllerFactory + Send + Sync>,
 
@@ -400,6 +401,17 @@ impl TransportConfig {
         self
     }
 
+    /// Whether a client scrambles the CRYPTO data of its Initial packets
+    ///
+    /// As Chromium's chaos protection does: a ClientHello larger than one packet has its head
+    /// and its tail sent first, CRYPTO frames are cut at random places, and PING frames and runs
+    /// of PADDING are mixed in, all in a random order. Packet sizes stay as they are. Defaults
+    /// to false.
+    pub fn chaos_protection(&mut self, value: bool) -> &mut Self {
+        self.chaos_protection = value;
+        self
+    }
+
     /// How to construct new `congestion::Controller`s
     ///
     /// Typically the refcounted configuration of a `congestion::Controller`,
@@ -544,6 +556,7 @@ impl Default for TransportConfig {
             initial_packet_number: 0,
             coalesce_packets: true,
             handshake_acks_alone: false,
+            chaos_protection: false,
 
             congestion_controller_factory: Arc::new(congestion::CubicConfig::default()),
 
@@ -586,6 +599,7 @@ impl fmt::Debug for TransportConfig {
             initial_packet_number,
             coalesce_packets,
             handshake_acks_alone,
+            chaos_protection,
             congestion_controller_factory: _,
             enable_segmentation_offload,
             qlog_sink,
@@ -625,6 +639,7 @@ impl fmt::Debug for TransportConfig {
             .field("initial_packet_number", initial_packet_number)
             .field("coalesce_packets", coalesce_packets)
             .field("handshake_acks_alone", handshake_acks_alone)
+            .field("chaos_protection", chaos_protection)
             // congestion_controller_factory not debug
             .field("enable_segmentation_offload", enable_segmentation_offload);
         if cfg!(feature = "qlog") {

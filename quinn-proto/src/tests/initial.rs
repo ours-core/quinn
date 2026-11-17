@@ -19,9 +19,15 @@ struct Sent {
 /// Connects with `transport` on the client and returns the client's datagrams up to the end of
 /// the handshake, each as its packets.
 fn handshake(transport: TransportConfig) -> Vec<Vec<Sent>> {
+    handshake_offering(transport, vec![b"h3".to_vec()])
+}
+
+/// [`handshake`], the client offering `alpn`, which the server takes.
+fn handshake_offering(transport: TransportConfig, alpn: Vec<Vec<u8>>) -> Vec<Vec<Sent>> {
     let _guard = subscribe();
-    let mut pair = Pair::default();
-    let mut config = client_config();
+    let server = ServerConfig::with_crypto(Arc::new(server_crypto_with_alpn(alpn.clone())));
+    let mut pair = Pair::new(Default::default(), server);
+    let mut config = ClientConfig::new(Arc::new(client_crypto_with_alpn(alpn)));
     config.transport_config(Arc::new(transport));
     let client_ch = pair.begin_connect(config);
     let mut datagrams = Vec::new();
@@ -155,4 +161,85 @@ fn handshake_acks_can_go_alone() {
         .filter(|packets| packets[0].space == SpaceId::Handshake)
         .count();
     assert_eq!(alone, together + 1);
+}
+
+/// The CRYPTO frames of a client's Initial packet, the PING frames and the runs of PADDING.
+fn layout(sent: &Sent) -> (Vec<(u64, usize)>, usize, usize) {
+    let mut crypto = Vec::new();
+    let (mut pings, mut runs, mut padding) = (0, 0, false);
+    for frame in &sent.frames {
+        match frame {
+            Frame::Crypto(frame) => crypto.push((frame.offset, frame.data.len())),
+            Frame::Ping => pings += 1,
+            Frame::Padding if !padding => runs += 1,
+            _ => {}
+        }
+        padding = matches!(frame, Frame::Padding);
+    }
+    (crypto, pings, runs)
+}
+
+/// The CRYPTO data of the client's first Initial packets, as ranges sorted by offset, which must
+/// leave no gap.
+fn covered(datagrams: &[Vec<Sent>]) -> u64 {
+    let mut ranges: Vec<(u64, usize)> = datagrams
+        .iter()
+        .flatten()
+        .filter(|sent| sent.space == SpaceId::Initial)
+        .take(2)
+        .flat_map(|sent| layout(sent).0)
+        .collect();
+    ranges.sort();
+    ranges.iter().fold(0, |end, &(offset, len)| {
+        assert!(offset <= end, "gap before {offset}: {ranges:?}");
+        end.max(offset + len as u64)
+    })
+}
+
+#[test]
+fn chaos_protection_scrambles_the_client_hello() {
+    let plain = handshake(TransportConfig::default());
+    let (crypto, pings, runs) = layout(&plain[0][0]);
+    assert_eq!((crypto.len(), pings, runs), (1, 0, 1));
+
+    let mut transport = TransportConfig::default();
+    transport.chaos_protection(true);
+    let scrambled = handshake(transport);
+    let (crypto, pings, runs) = layout(&scrambled[0][0]);
+    assert!(crypto.len() >= 3, "{crypto:?}");
+    assert!(pings >= 2);
+    assert!(runs >= 2);
+    assert!(covered(&scrambled) > 200);
+}
+
+#[test]
+fn chaos_protection_sends_the_ends_of_a_long_client_hello_first() {
+    // Protocols enough to take the hello over one packet.
+    let alpn: Vec<Vec<u8>> = (0..8u8).map(|i| vec![b'a' + i; 200]).collect();
+    let mut transport = TransportConfig::default();
+    transport.chaos_protection(true);
+    transport.coalesce_packets(false);
+    let datagrams = handshake_offering(transport, alpn);
+    let total = covered(&datagrams);
+    assert!(total > 1500, "{total}");
+    let (first, ..) = layout(&datagrams[0][0]);
+    assert!(first.iter().any(|&(offset, _)| offset == 0));
+    assert!(
+        first
+            .iter()
+            .any(|&(offset, len)| offset + len as u64 == total),
+        "the tail first: {first:?}"
+    );
+    let head = first
+        .iter()
+        .filter(|&&(offset, _)| offset < 100)
+        .map(|&(offset, len)| offset + len as u64)
+        .max()
+        .unwrap();
+    assert!((55..87).contains(&head), "{first:?}");
+    let (second, ..) = layout(&datagrams[1][0]);
+    assert!(
+        second.iter().any(|&(offset, _)| offset == head),
+        "the middle next: {second:?}"
+    );
 }
