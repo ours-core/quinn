@@ -63,6 +63,7 @@ pub struct TransportConfig {
     pub(crate) coalesce_packets: bool,
     pub(crate) handshake_acks_alone: bool,
     pub(crate) chaos_protection: bool,
+    pub(crate) packet_number_window: Option<u64>,
 
     pub(crate) congestion_controller_factory: Arc<dyn congestion::ControllerFactory + Send + Sync>,
 
@@ -412,6 +413,17 @@ impl TransportConfig {
         self
     }
 
+    /// Size the packet numbers of long header packets for a congestion window of this many bytes
+    ///
+    /// As Chromium does: by four times the larger of the unacknowledged packets and the window
+    /// counted in packets, with no three-byte length. A packet counts as the room padding took in
+    /// the last datagram, when that leaves room for a header, until new keys come. `None`, the
+    /// default, sizes them by the unacknowledged packets alone.
+    pub fn packet_number_window(&mut self, value: Option<u64>) -> &mut Self {
+        self.packet_number_window = value;
+        self
+    }
+
     /// How to construct new `congestion::Controller`s
     ///
     /// Typically the refcounted configuration of a `congestion::Controller`,
@@ -557,6 +569,7 @@ impl Default for TransportConfig {
             coalesce_packets: true,
             handshake_acks_alone: false,
             chaos_protection: false,
+            packet_number_window: None,
 
             congestion_controller_factory: Arc::new(congestion::CubicConfig::default()),
 
@@ -600,6 +613,7 @@ impl fmt::Debug for TransportConfig {
             coalesce_packets,
             handshake_acks_alone,
             chaos_protection,
+            packet_number_window,
             congestion_controller_factory: _,
             enable_segmentation_offload,
             qlog_sink,
@@ -640,6 +654,7 @@ impl fmt::Debug for TransportConfig {
             .field("coalesce_packets", coalesce_packets)
             .field("handshake_acks_alone", handshake_acks_alone)
             .field("chaos_protection", chaos_protection)
+            .field("packet_number_window", packet_number_window)
             // congestion_controller_factory not debug
             .field("enable_segmentation_offload", enable_segmentation_offload);
         if cfg!(feature = "qlog") {

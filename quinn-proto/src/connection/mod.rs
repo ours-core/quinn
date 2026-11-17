@@ -174,6 +174,8 @@ pub struct Connection {
     endpoint_events: VecDeque<EndpointEventInner>,
     /// Whether the spin bit is in use for this connection
     spin_enabled: bool,
+    /// The padding of the last datagram, which packet numbers are sized by
+    last_datagram_padding: usize,
     /// Outgoing spin bit state
     spin: bool,
     /// Packet number spaces: initial, handshake, 1-RTT
@@ -317,6 +319,7 @@ impl Connection {
             endpoint_events: VecDeque::new(),
             spin_enabled: config.allow_spin && rng.random_ratio(7, 8),
             spin: false,
+            last_datagram_padding: 0,
             spaces: [initial_space, PacketSpace::new(now), PacketSpace::new(now)],
             highest_space: SpaceId::Initial,
             prev_crypto: None,
@@ -2206,6 +2209,7 @@ impl Connection {
             "already reached packet space {space:?}"
         );
         trace!("{:?} keys ready", space);
+        self.last_datagram_padding = 0;
         if space == SpaceId::Data {
             // Precompute the first key update
             self.next_crypto = Some(

@@ -13,6 +13,7 @@ use crate::{
 struct Sent {
     space: SpaceId,
     number: Option<u64>,
+    number_len: usize,
     frames: Vec<Frame>,
 }
 
@@ -74,6 +75,7 @@ fn handshake_offering(transport: TransportConfig, alpn: Vec<Vec<u8>>) -> Vec<Vec
                     packets.push(Sent {
                         space,
                         number: None,
+                        number_len: 0,
                         frames: Vec::new(),
                     });
                     continue;
@@ -94,6 +96,7 @@ fn handshake_offering(transport: TransportConfig, alpn: Vec<Vec<u8>>) -> Vec<Vec
                 packets.push(Sent {
                     space,
                     number: Some(number),
+                    number_len: header.number.len(),
                     frames,
                 });
             }
@@ -241,5 +244,32 @@ fn chaos_protection_sends_the_ends_of_a_long_client_hello_first() {
     assert!(
         second.iter().any(|&(offset, _)| offset == head),
         "the middle next: {second:?}"
+    );
+}
+
+#[test]
+fn long_header_packet_numbers_can_be_sized_by_a_window() {
+    let alpn: Vec<Vec<u8>> = (0..8u8).map(|i| vec![b'a' + i; 200]).collect();
+    let mut transport = TransportConfig::default();
+    transport.initial_packet_number(1);
+    transport.chaos_protection(true);
+    transport.coalesce_packets(false);
+    transport.packet_number_window(Some(40_000));
+    let datagrams = handshake_offering(transport, alpn.clone());
+    let lengths: Vec<(u64, usize)> = datagrams
+        .iter()
+        .flatten()
+        .filter(|sent| sent.space == SpaceId::Initial)
+        .map(|sent| (sent.number.unwrap(), sent.number_len))
+        .collect();
+    // The second packet follows the padding of the first, the third new keys.
+    assert_eq!(lengths[..3], [(1, 1), (2, 2), (3, 1)], "{lengths:?}");
+
+    let datagrams = handshake_offering(TransportConfig::default(), alpn);
+    assert!(
+        datagrams
+            .iter()
+            .flatten()
+            .all(|sent| sent.space != SpaceId::Initial || sent.number_len == 1)
     );
 }

@@ -702,6 +702,17 @@ impl PacketNumber {
         }
     }
 
+    /// The length Chromium gives packet number `n`: room for four times the larger of the
+    /// unacknowledged packets and `window`, in packets, and never three bytes
+    pub(crate) fn for_window(n: u64, largest_acked: Option<u64>, window: u64) -> Self {
+        let unacked = largest_acked.map_or(n + 1, |largest| n - largest);
+        match unacked.max(window) {
+            range if range < 1 << 6 => Self::U8(n as u8),
+            range if range < 1 << 14 => Self::U16(n as u16),
+            _ => Self::U32(n as u32),
+        }
+    }
+
     pub(crate) fn len(self) -> usize {
         use PacketNumber::*;
         match self {

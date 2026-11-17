@@ -86,7 +86,21 @@ impl PacketBuilder {
 
         let span = trace_span!("send", space = ?space_id, pn = exact_number).entered();
 
-        let number = PacketNumber::new(exact_number, space.largest_acked_packet.unwrap_or(0));
+        let number = match conn.config.packet_number_window {
+            Some(window) if space_id != SpaceId::Data => {
+                // The room padding took, when a header would fit in it
+                let packet = match conn.last_datagram_padding {
+                    padding if padding >= 40 => padding,
+                    _ => usize::from(conn.path.current_mtu()),
+                };
+                PacketNumber::for_window(
+                    exact_number,
+                    space.largest_acked_packet,
+                    window / packet as u64,
+                )
+            }
+            _ => PacketNumber::new(exact_number, space.largest_acked_packet.unwrap_or(0)),
+        };
         let header = match space_id {
             SpaceId::Data if space.crypto.is_some() => Header::Short {
                 dst_cid,
@@ -217,6 +231,12 @@ impl PacketBuilder {
             .and_then(|sent| sent.retransmits.get())
             .map(|retransmits| &retransmits.crypto)
             .filter(|crypto| !crypto.is_empty());
+        if space_id != SpaceId::Data {
+            conn.last_datagram_padding = match space_id {
+                SpaceId::Initial => self.min_size.saturating_sub(buffer.len()),
+                _ => 0,
+            };
+        }
         let scramble = space_id == SpaceId::Initial
             && conn.side.is_client()
             && conn.config.chaos_protection
