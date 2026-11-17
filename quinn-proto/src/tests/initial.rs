@@ -116,3 +116,24 @@ fn initial_packet_number_is_configurable() {
     let datagrams = handshake(TransportConfig::default());
     assert_eq!(datagrams[0][0].number, Some(0));
 }
+
+#[test]
+fn packets_can_keep_a_datagram_each() {
+    let datagrams = handshake(TransportConfig::default());
+    assert!(
+        datagrams.iter().any(|packets| packets.len() > 1),
+        "quinn coalesces by default"
+    );
+
+    let mut transport = TransportConfig::default();
+    transport.coalesce_packets(false);
+    let datagrams = handshake(transport);
+    for packets in &datagrams {
+        assert_eq!(packets.len(), 1, "{datagrams:?}");
+    }
+    assert!(
+        datagrams
+            .iter()
+            .any(|packets| packets[0].space == SpaceId::Handshake)
+    );
+}

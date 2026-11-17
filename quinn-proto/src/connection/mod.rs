@@ -792,7 +792,7 @@ impl Connection {
                 ack_eliciting,
                 self,
             )?);
-            coalesce = coalesce && !builder.short_header;
+            coalesce = coalesce && !builder.short_header && self.config.coalesce_packets;
 
             // https://tools.ietf.org/html/draft-ietf-quic-transport-34#section-14.1
             pad_datagram |=

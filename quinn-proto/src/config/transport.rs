@@ -60,6 +60,7 @@ pub struct TransportConfig {
     #[cfg(test)]
     pub(crate) deterministic_packet_numbers: bool,
     pub(crate) initial_packet_number: u64,
+    pub(crate) coalesce_packets: bool,
 
     pub(crate) congestion_controller_factory: Arc<dyn congestion::ControllerFactory + Send + Sync>,
 
@@ -382,6 +383,14 @@ impl TransportConfig {
         self
     }
 
+    /// Whether packets of different packet number spaces may share a datagram
+    ///
+    /// Defaults to true. Without it, each datagram carries one packet.
+    pub fn coalesce_packets(&mut self, value: bool) -> &mut Self {
+        self.coalesce_packets = value;
+        self
+    }
+
     /// How to construct new `congestion::Controller`s
     ///
     /// Typically the refcounted configuration of a `congestion::Controller`,
@@ -524,6 +533,7 @@ impl Default for TransportConfig {
             #[cfg(test)]
             deterministic_packet_numbers: false,
             initial_packet_number: 0,
+            coalesce_packets: true,
 
             congestion_controller_factory: Arc::new(congestion::CubicConfig::default()),
 
@@ -564,6 +574,7 @@ impl fmt::Debug for TransportConfig {
             #[cfg(test)]
                 deterministic_packet_numbers: _,
             initial_packet_number,
+            coalesce_packets,
             congestion_controller_factory: _,
             enable_segmentation_offload,
             qlog_sink,
@@ -601,6 +612,7 @@ impl fmt::Debug for TransportConfig {
             .field("datagram_receive_buffer_size", datagram_receive_buffer_size)
             .field("datagram_send_buffer_size", datagram_send_buffer_size)
             .field("initial_packet_number", initial_packet_number)
+            .field("coalesce_packets", coalesce_packets)
             // congestion_controller_factory not debug
             .field("enable_segmentation_offload", enable_segmentation_offload);
         if cfg!(feature = "qlog") {
